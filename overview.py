@@ -41,8 +41,8 @@ def has_content(value):
         return False
     return True
 
-def calculate_ai_metrics(df):
-    """Calculate AI coverage based on actual response presence"""
+def calculate_ai_metrics(df, use_aio=True, use_perplexity=True, use_gpt=True):
+    """Calculate AI coverage based on actual response presence and selected platforms"""
     
     # Required columns for AI analysis
     required_cols = [
@@ -56,21 +56,21 @@ def calculate_ai_metrics(df):
     
     # Calculate coverage for each platform (1 if has response/sources, 0 if not)
     df['aio_covered'] = df.apply(lambda row: 1 if (
-        has_content(row['aio_response_sources']) or 
-        (has_content(row['aio_response_status']) and str(row['aio_response_status']).lower() != 'no response')
+        use_aio and (has_content(row['aio_response_sources']) or 
+        (has_content(row['aio_response_status']) and str(row['aio_response_status']).lower() != 'no response'))
     ) else 0, axis=1)
     
     df['perplexity_covered'] = df.apply(lambda row: 1 if (
-        has_content(row['perplexity_sources']) or has_content(row['perplexity_response_text'])
+        use_perplexity and (has_content(row['perplexity_sources']) or has_content(row['perplexity_response_text']))
     ) else 0, axis=1)
     
     df['gpt_covered'] = df.apply(lambda row: 1 if (
-        has_content(row['gpt_sources']) or has_content(row['gpt_response_text'])
+        use_gpt and (has_content(row['gpt_sources']) or has_content(row['gpt_response_text']))
     ) else 0, axis=1)
     
     df['serp_covered'] = df.apply(lambda row: 1 if has_content(row['serp_results']) else 0, axis=1)
     
-    # Calculate AI total (sum of all AI platforms)
+    # Calculate AI total (sum of selected AI platforms)
     df['ai_total'] = df['aio_covered'] + df['perplexity_covered'] + df['gpt_covered']
     
     # Extract domains and calculate weighted scores
@@ -78,7 +78,14 @@ def calculate_ai_metrics(df):
     domain_serp_scores = {}
     domain_breakdown = {}  # Track breakdown by AI platform
     
-    source_columns = ['aio_response_sources', 'perplexity_sources', 'gpt_sources']
+    # Only include source columns for selected platforms
+    source_columns = []
+    if use_aio:
+        source_columns.append('aio_response_sources')
+    if use_perplexity:
+        source_columns.append('perplexity_sources')
+    if use_gpt:
+        source_columns.append('gpt_sources')
     
     for idx, row in df.iterrows():
         ai_total = row['ai_total']
@@ -118,7 +125,8 @@ def calculate_ai_metrics(df):
         'domain_serp_scores': domain_serp_scores,
         'domain_breakdown': domain_breakdown,
         'df': df,
-        'total_queries': len(df)
+        'total_queries': len(df),
+        'selected_platforms': {'aio': use_aio, 'perplexity': use_perplexity, 'gpt': use_gpt}
     }, None
 
 def main():
@@ -131,6 +139,31 @@ def main():
     st.title("🤖 AI vs SERP Domain Influence Analysis")
     st.markdown("Analyze domain influence across AI platforms (AIO, Perplexity, GPT) vs traditional SERP results")
     
+    # AI Platform Selector
+    st.header("🔧 AI Platform Selection")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        use_aio = st.checkbox("AI Overviews", value=True)
+    with col2:
+        use_perplexity = st.checkbox("Perplexity", value=True)
+    with col3:
+        use_gpt = st.checkbox("ChatGPT", value=True)
+    
+    if not any([use_aio, use_perplexity, use_gpt]):
+        st.error("❌ Please select at least one AI platform for analysis")
+        return
+    
+    selected_platforms = []
+    if use_aio:
+        selected_platforms.append("AI Overviews")
+    if use_perplexity:
+        selected_platforms.append("Perplexity")
+    if use_gpt:
+        selected_platforms.append("ChatGPT")
+    
+    st.success(f"✅ Selected platforms: {', '.join(selected_platforms)}")
+    
     uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
     
     if uploaded_file is not None:
@@ -139,7 +172,7 @@ def main():
             st.success(f"✅ Successfully loaded CSV with {len(df)} rows and {len(df.columns)} columns")
             
             # Calculate metrics
-            result, error = calculate_ai_metrics(df)
+            result, error = calculate_ai_metrics(df, use_aio, use_perplexity, use_gpt)
             
             if error:
                 st.error(f"❌ {error}")
@@ -151,6 +184,7 @@ def main():
             domain_breakdown = result['domain_breakdown']
             processed_df = result['df']
             total_queries = result['total_queries']
+            selected_platforms = result['selected_platforms']
             
             if not domain_ai_scores:
                 st.warning("⚠️ No domains found in AI source columns")
@@ -179,15 +213,36 @@ def main():
             
             # Platform coverage rates
             st.subheader("📈 Platform Coverage Rates")
+            
+            # Only show selected platforms
+            platform_names = []
+            platform_coverages = []
+            platform_rates = []
+            
+            if use_aio:
+                platform_names.append('AI Overviews')
+                platform_coverages.append(total_aio_coverage)
+                platform_rates.append(f"{total_aio_coverage/total_queries*100:.1f}%")
+            
+            if use_perplexity:
+                platform_names.append('Perplexity')
+                platform_coverages.append(total_perplexity_coverage)
+                platform_rates.append(f"{total_perplexity_coverage/total_queries*100:.1f}%")
+            
+            if use_gpt:
+                platform_names.append('ChatGPT')
+                platform_coverages.append(total_gpt_coverage)
+                platform_rates.append(f"{total_gpt_coverage/total_queries*100:.1f}%")
+            
+            # Always show SERP
+            platform_names.append('SERP')
+            platform_coverages.append(total_serp_coverage)
+            platform_rates.append(f"{total_serp_coverage/total_queries*100:.1f}%")
+            
             coverage_data = {
-                'Platform': ['AIO', 'Perplexity', 'GPT', 'SERP'],
-                'Coverage': [total_aio_coverage, total_perplexity_coverage, total_gpt_coverage, total_serp_coverage],
-                'Rate': [
-                    f"{total_aio_coverage/total_queries*100:.1f}%",
-                    f"{total_perplexity_coverage/total_queries*100:.1f}%", 
-                    f"{total_gpt_coverage/total_queries*100:.1f}%",
-                    f"{total_serp_coverage/total_queries*100:.1f}%"
-                ]
+                'Platform': platform_names,
+                'Coverage': platform_coverages,
+                'Rate': platform_rates
             }
             
             fig_coverage = px.bar(
@@ -237,9 +292,9 @@ def main():
                             'Domain': domain,
                             'AI Total Score': ai_score,
                             'SERP Score': serp_score,
-                            'AIO Citations': breakdown.get('aio_response_sources', 0),
-                            'Perplexity Citations': breakdown.get('perplexity_sources', 0),
-                            'GPT Citations': breakdown.get('gpt_sources', 0),
+                            'AIO Citations': breakdown.get('aio_response_sources', 0) if use_aio else 'N/A',
+                            'Perplexity Citations': breakdown.get('perplexity_sources', 0) if use_perplexity else 'N/A',
+                            'GPT Citations': breakdown.get('gpt_sources', 0) if use_gpt else 'N/A',
                             'AI/SERP Ratio': round(ai_score / serp_score, 2) if serp_score > 0 else '∞'
                         })
                     
