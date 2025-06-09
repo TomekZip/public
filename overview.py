@@ -28,62 +28,96 @@ def get_domain_from_url(url):
 
 def extract_urls_from_text(text):
     """Extract URLs from text using regex"""
-    if pd.isna(text) or text == '':
+    if pd.isna(text) or text == '' or str(text).strip() == '':
         return []
     
     url_pattern = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
     urls = re.findall(url_pattern, str(text))
     return [normalize_url(url) for url in urls]
 
-def calculate_coverage_metrics(df):
-    """Calculate AI total and SERP coverage metrics"""
+def has_content(value):
+    """Check if a field has meaningful content"""
+    if pd.isna(value) or value == '' or str(value).strip() == '':
+        return False
+    return True
+
+def calculate_ai_metrics(df):
+    """Calculate AI coverage based on actual response presence"""
     
-    # Check required columns exist
-    ai_columns = ['sge_queries_covered', 'perplexity_queries_covered', 'gpt_queries_covered']
-    serp_column = 'serp_queries_covered'
-    source_columns = ['gpt_sources', 'perplexity_sources', 'aio_response_sources']
+    # Required columns for AI analysis
+    required_cols = [
+        'aio_response_sources', 'perplexity_sources', 'gpt_sources',
+        'serp_results', 'aio_response_status', 'perplexity_response_text', 'gpt_response_text'
+    ]
     
-    missing_cols = []
-    for col in ai_columns + [serp_column] + source_columns:
-        if col not in df.columns:
-            missing_cols.append(col)
-    
+    missing_cols = [col for col in required_cols if col not in df.columns]
     if missing_cols:
-        return None, f"Missing columns: {', '.join(missing_cols)}"
+        return None, f"Missing required columns: {', '.join(missing_cols)}"
     
-    # Calculate AI total for each row
-    df['ai_total'] = df[ai_columns].sum(axis=1)
+    # Calculate coverage for each platform (1 if has response/sources, 0 if not)
+    df['aio_covered'] = df.apply(lambda row: 1 if (
+        has_content(row['aio_response_sources']) or 
+        (has_content(row['aio_response_status']) and str(row['aio_response_status']).lower() != 'no response')
+    ) else 0, axis=1)
     
-    # Extract domains from source columns and calculate weighted scores
+    df['perplexity_covered'] = df.apply(lambda row: 1 if (
+        has_content(row['perplexity_sources']) or has_content(row['perplexity_response_text'])
+    ) else 0, axis=1)
+    
+    df['gpt_covered'] = df.apply(lambda row: 1 if (
+        has_content(row['gpt_sources']) or has_content(row['gpt_response_text'])
+    ) else 0, axis=1)
+    
+    df['serp_covered'] = df.apply(lambda row: 1 if has_content(row['serp_results']) else 0, axis=1)
+    
+    # Calculate AI total (sum of all AI platforms)
+    df['ai_total'] = df['aio_covered'] + df['perplexity_covered'] + df['gpt_covered']
+    
+    # Extract domains and calculate weighted scores
     domain_ai_scores = {}
     domain_serp_scores = {}
+    domain_breakdown = {}  # Track breakdown by AI platform
+    
+    source_columns = ['aio_response_sources', 'perplexity_sources', 'gpt_sources']
     
     for idx, row in df.iterrows():
         ai_total = row['ai_total']
-        serp_total = row['serp_queries_covered'] if not pd.isna(row['serp_queries_covered']) else 0
+        serp_total = row['serp_covered']
         
-        # Get all domains from this row's sources
+        # Get all domains from AI sources in this row
         all_domains = set()
+        row_domain_sources = {}  # Track which AI platforms mention each domain in this row
+        
         for col in source_columns:
-            if not pd.isna(row[col]):
+            if has_content(row[col]):
                 urls = extract_urls_from_text(row[col])
                 domains = [get_domain_from_url(url) for url in urls]
-                all_domains.update(domains)
+                
+                for domain in domains:
+                    all_domains.add(domain)
+                    if domain not in row_domain_sources:
+                        row_domain_sources[domain] = []
+                    row_domain_sources[domain].append(col)
         
         # Add scores for each domain found in this row
         for domain in all_domains:
             if domain not in domain_ai_scores:
                 domain_ai_scores[domain] = 0
-            if domain not in domain_serp_scores:
                 domain_serp_scores[domain] = 0
+                domain_breakdown[domain] = {'aio_response_sources': 0, 'perplexity_sources': 0, 'gpt_sources': 0}
             
             domain_ai_scores[domain] += ai_total
             domain_serp_scores[domain] += serp_total
+            
+            # Track breakdown by AI platform
+            for source_col in row_domain_sources[domain]:
+                domain_breakdown[domain][source_col] += 1
     
     return {
         'domain_ai_scores': domain_ai_scores,
         'domain_serp_scores': domain_serp_scores,
-        'ai_columns': ai_columns,
+        'domain_breakdown': domain_breakdown,
+        'df': df,
         'total_queries': len(df)
     }, None
 
@@ -95,7 +129,7 @@ def main():
     )
     
     st.title("🤖 AI vs SERP Domain Influence Analysis")
-    st.markdown("Analyze domain influence across AI platforms vs traditional SERP results")
+    st.markdown("Analyze domain influence across AI platforms (AIO, Perplexity, GPT) vs traditional SERP results")
     
     uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
     
@@ -105,7 +139,7 @@ def main():
             st.success(f"✅ Successfully loaded CSV with {len(df)} rows and {len(df.columns)} columns")
             
             # Calculate metrics
-            result, error = calculate_coverage_metrics(df)
+            result, error = calculate_ai_metrics(df)
             
             if error:
                 st.error(f"❌ {error}")
@@ -114,34 +148,65 @@ def main():
             
             domain_ai_scores = result['domain_ai_scores']
             domain_serp_scores = result['domain_serp_scores']
-            ai_columns = result['ai_columns']
+            domain_breakdown = result['domain_breakdown']
+            processed_df = result['df']
             total_queries = result['total_queries']
             
             if not domain_ai_scores:
-                st.warning("⚠️ No domains found in source columns")
+                st.warning("⚠️ No domains found in AI source columns")
                 return
             
             # Calculate summary stats
-            total_ai_coverage = df[ai_columns].sum().sum()
-            total_serp_coverage = df['serp_queries_covered'].sum()
+            total_aio_coverage = processed_df['aio_covered'].sum()
+            total_perplexity_coverage = processed_df['perplexity_covered'].sum()
+            total_gpt_coverage = processed_df['gpt_covered'].sum()
+            total_ai_coverage = processed_df['ai_total'].sum()
+            total_serp_coverage = processed_df['serp_covered'].sum()
             
             st.header("📊 Coverage Summary")
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2, col3, col4, col5 = st.columns(5)
             
             with col1:
                 st.metric("Total Queries", total_queries)
             with col2:
-                st.metric("Total AI Coverage", f"{total_ai_coverage:,}")
+                st.metric("AIO Coverage", f"{total_aio_coverage}")
             with col3:
-                st.metric("Total SERP Coverage", f"{total_serp_coverage:,}")
+                st.metric("Perplexity Coverage", f"{total_perplexity_coverage}")
             with col4:
-                st.metric("Unique Domains", len(domain_ai_scores))
+                st.metric("GPT Coverage", f"{total_gpt_coverage}")
+            with col5:
+                st.metric("SERP Coverage", f"{total_serp_coverage}")
+            
+            # Platform coverage rates
+            st.subheader("📈 Platform Coverage Rates")
+            coverage_data = {
+                'Platform': ['AIO', 'Perplexity', 'GPT', 'SERP'],
+                'Coverage': [total_aio_coverage, total_perplexity_coverage, total_gpt_coverage, total_serp_coverage],
+                'Rate': [
+                    f"{total_aio_coverage/total_queries*100:.1f}%",
+                    f"{total_perplexity_coverage/total_queries*100:.1f}%", 
+                    f"{total_gpt_coverage/total_queries*100:.1f}%",
+                    f"{total_serp_coverage/total_queries*100:.1f}%"
+                ]
+            }
+            
+            fig_coverage = px.bar(
+                x=coverage_data['Platform'],
+                y=coverage_data['Coverage'],
+                title="Query Coverage by Platform",
+                labels={'x': 'Platform', 'y': 'Queries Covered'},
+                color=coverage_data['Coverage'],
+                color_continuous_scale='viridis',
+                text=coverage_data['Rate']
+            )
+            fig_coverage.update_traces(textposition='outside')
+            st.plotly_chart(fig_coverage, use_container_width=True)
             
             # Create tabs for different analyses
-            tab1, tab2, tab3, tab4 = st.tabs(["🏆 Top AI Domains", "🤖 AI Popular vs SERP", "🔍 SERP Popular vs AI", "📈 Comparison Analysis"])
+            tab1, tab2, tab3, tab4, tab5 = st.tabs(["🏆 Top AI Domains", "🤖 AI Popular vs SERP", "🔍 SERP Popular vs AI", "📊 Platform Breakdown", "📈 Comparison Analysis"])
             
             with tab1:
-                st.header("Top Influential Domains by AI Total")
+                st.header("Top Influential Domains by AI Total Score")
                 
                 # Sort domains by AI total score
                 top_ai_domains = sorted(domain_ai_scores.items(), key=lambda x: x[1], reverse=True)[:20]
@@ -162,15 +227,19 @@ def main():
                     fig.update_layout(height=600, yaxis={'categoryorder':'total ascending'})
                     st.plotly_chart(fig, use_container_width=True)
                     
-                    # Table with AI and SERP scores
+                    # Table with detailed breakdown
                     st.subheader("📋 Top AI Domains Detailed Breakdown")
                     table_data = []
                     for domain, ai_score in top_ai_domains:
                         serp_score = domain_serp_scores.get(domain, 0)
+                        breakdown = domain_breakdown.get(domain, {})
                         table_data.append({
                             'Domain': domain,
                             'AI Total Score': ai_score,
-                            'SERP Total Score': serp_score,
+                            'SERP Score': serp_score,
+                            'AIO Citations': breakdown.get('aio_response_sources', 0),
+                            'Perplexity Citations': breakdown.get('perplexity_sources', 0),
+                            'GPT Citations': breakdown.get('gpt_sources', 0),
                             'AI/SERP Ratio': round(ai_score / serp_score, 2) if serp_score > 0 else '∞'
                         })
                     
@@ -178,23 +247,24 @@ def main():
             
             with tab2:
                 st.header("Domains Popular in AI but Not in SERP")
-                st.markdown("Domains with high AI coverage but low/no SERP presence")
+                st.markdown("Domains frequently cited by AI platforms but rarely appearing in SERP results")
                 
                 # Find domains popular in AI but not in SERP
                 ai_not_serp = []
                 for domain, ai_score in domain_ai_scores.items():
                     serp_score = domain_serp_scores.get(domain, 0)
                     
-                    # Consider "popular in AI" if score > median, "not popular in SERP" if score < 25% of AI score
-                    ai_median = np.median(list(domain_ai_scores.values()))
-                    
-                    if ai_score >= ai_median and (serp_score == 0 or serp_score < ai_score * 0.25):
-                        ratio = ai_score / serp_score if serp_score > 0 else float('inf')
+                    # Consider "popular in AI" if score >= 2, "not popular in SERP" if SERP score is 0 or much lower
+                    if ai_score >= 2 and (serp_score == 0 or ai_score > serp_score * 3):
+                        breakdown = domain_breakdown.get(domain, {})
                         ai_not_serp.append({
                             'Domain': domain,
                             'AI Score': ai_score,
                             'SERP Score': serp_score,
-                            'AI/SERP Ratio': ratio
+                            'AIO Citations': breakdown.get('aio_response_sources', 0),
+                            'Perplexity Citations': breakdown.get('perplexity_sources', 0),
+                            'GPT Citations': breakdown.get('gpt_sources', 0),
+                            'AI/SERP Ratio': ai_score / serp_score if serp_score > 0 else float('inf')
                         })
                 
                 ai_not_serp.sort(key=lambda x: x['AI Score'], reverse=True)
@@ -220,27 +290,28 @@ def main():
                     st.subheader(f"📋 All {len(ai_not_serp)} Domains Popular in AI but Not SERP")
                     st.dataframe(pd.DataFrame(ai_not_serp), use_container_width=True)
                 else:
-                    st.info("No domains found that are popular in AI but not in SERP")
+                    st.info("No domains found that are significantly more popular in AI than SERP")
             
             with tab3:
                 st.header("Domains Popular in SERP but Not in AI")
-                st.markdown("Domains with high SERP coverage but low/no AI presence")
+                st.markdown("Domains frequently appearing in SERP results but rarely cited by AI platforms")
                 
                 # Find domains popular in SERP but not in AI
                 serp_not_ai = []
                 for domain, serp_score in domain_serp_scores.items():
                     ai_score = domain_ai_scores.get(domain, 0)
                     
-                    # Consider "popular in SERP" if score > median, "not popular in AI" if score < 25% of SERP score
-                    serp_median = np.median(list(domain_serp_scores.values()))
-                    
-                    if serp_score >= serp_median and (ai_score == 0 or ai_score < serp_score * 0.25):
-                        ratio = serp_score / ai_score if ai_score > 0 else float('inf')
+                    # Consider "popular in SERP" if score >= 2, "not popular in AI" if AI score is 0 or much lower
+                    if serp_score >= 2 and (ai_score == 0 or serp_score > ai_score * 3):
+                        breakdown = domain_breakdown.get(domain, {})
                         serp_not_ai.append({
                             'Domain': domain,
                             'SERP Score': serp_score,
                             'AI Score': ai_score,
-                            'SERP/AI Ratio': ratio
+                            'AIO Citations': breakdown.get('aio_response_sources', 0),
+                            'Perplexity Citations': breakdown.get('perplexity_sources', 0),
+                            'GPT Citations': breakdown.get('gpt_sources', 0),
+                            'SERP/AI Ratio': serp_score / ai_score if ai_score > 0 else float('inf')
                         })
                 
                 serp_not_ai.sort(key=lambda x: x['SERP Score'], reverse=True)
@@ -266,9 +337,57 @@ def main():
                     st.subheader(f"📋 All {len(serp_not_ai)} Domains Popular in SERP but Not AI")
                     st.dataframe(pd.DataFrame(serp_not_ai), use_container_width=True)
                 else:
-                    st.info("No domains found that are popular in SERP but not in AI")
+                    st.info("No domains found that are significantly more popular in SERP than AI")
             
             with tab4:
+                st.header("AI Platform Breakdown Analysis")
+                
+                # Create breakdown by AI platform
+                platform_totals = {
+                    'AIO': sum(breakdown.get('aio_response_sources', 0) for breakdown in domain_breakdown.values()),
+                    'Perplexity': sum(breakdown.get('perplexity_sources', 0) for breakdown in domain_breakdown.values()),
+                    'GPT': sum(breakdown.get('gpt_sources', 0) for breakdown in domain_breakdown.values())
+                }
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # Pie chart of platform distribution
+                    fig_pie = px.pie(
+                        values=list(platform_totals.values()),
+                        names=list(platform_totals.keys()),
+                        title="Domain Citations by AI Platform"
+                    )
+                    st.plotly_chart(fig_pie, use_container_width=True)
+                
+                with col2:
+                    # Bar chart of platform totals
+                    fig_bar = px.bar(
+                        x=list(platform_totals.keys()),
+                        y=list(platform_totals.values()),
+                        title="Total Domain Citations by Platform",
+                        labels={'x': 'AI Platform', 'y': 'Total Citations'},
+                        color=list(platform_totals.values()),
+                        color_continuous_scale='viridis'
+                    )
+                    st.plotly_chart(fig_bar, use_container_width=True)
+                
+                # Top domains by platform
+                st.subheader("📊 Top Domains by AI Platform")
+                
+                for platform, column in [('AIO', 'aio_response_sources'), ('Perplexity', 'perplexity_sources'), ('GPT', 'gpt_sources')]:
+                    platform_domains = [(domain, breakdown.get(column, 0)) 
+                                      for domain, breakdown in domain_breakdown.items() 
+                                      if breakdown.get(column, 0) > 0]
+                    platform_domains.sort(key=lambda x: x[1], reverse=True)
+                    
+                    if platform_domains:
+                        st.write(f"**Top 10 {platform} Domains:**")
+                        top_10 = platform_domains[:10]
+                        platform_df = pd.DataFrame(top_10, columns=['Domain', f'{platform} Citations'])
+                        st.dataframe(platform_df, use_container_width=True)
+            
+            with tab5:
                 st.header("AI vs SERP Comparison Analysis")
                 
                 # Scatter plot comparing AI vs SERP scores
@@ -311,14 +430,21 @@ def main():
                 
                 # Correlation analysis
                 correlation = scatter_df['AI Score'].corr(scatter_df['SERP Score'])
-                st.metric("AI vs SERP Correlation", f"{correlation:.3f}")
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.metric("AI vs SERP Correlation", f"{correlation:.3f}")
+                with col2:
+                    st.metric("Unique Domains", len(all_domains))
+                with col3:
+                    st.metric("Total AI Citations", sum(domain_ai_scores.values()))
                 
                 if correlation > 0.7:
-                    st.success("Strong positive correlation - AI and SERP tend to favor similar domains")
+                    st.success("🟢 Strong positive correlation - AI and SERP tend to favor similar domains")
                 elif correlation > 0.3:
-                    st.info("Moderate positive correlation - Some alignment between AI and SERP preferences")
+                    st.info("🟡 Moderate positive correlation - Some alignment between AI and SERP preferences")
                 else:
-                    st.warning("Weak correlation - AI and SERP show different domain preferences")
+                    st.warning("🔴 Weak correlation - AI and SERP show different domain preferences")
             
             # Download section
             st.header("💾 Download Results")
@@ -326,17 +452,21 @@ def main():
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                # All domains analysis
+                # Complete analysis
                 all_analysis = []
                 all_domains = set(list(domain_ai_scores.keys()) + list(domain_serp_scores.keys()))
                 
                 for domain in all_domains:
                     ai_score = domain_ai_scores.get(domain, 0)
                     serp_score = domain_serp_scores.get(domain, 0)
+                    breakdown = domain_breakdown.get(domain, {})
                     all_analysis.append({
                         'Domain': domain,
                         'AI_Total_Score': ai_score,
                         'SERP_Total_Score': serp_score,
+                        'AIO_Citations': breakdown.get('aio_response_sources', 0),
+                        'Perplexity_Citations': breakdown.get('perplexity_sources', 0),
+                        'GPT_Citations': breakdown.get('gpt_sources', 0),
                         'AI_SERP_Ratio': ai_score / serp_score if serp_score > 0 else float('inf')
                     })
                 
@@ -344,7 +474,7 @@ def main():
                 all_df = all_df.sort_values('AI_Total_Score', ascending=False)
                 
                 st.download_button(
-                    label="📥 Download Complete Analysis",
+                    label="📥 Complete Analysis",
                     data=all_df.to_csv(index=False),
                     file_name="complete_domain_analysis.csv",
                     mime="text/csv"
@@ -354,7 +484,7 @@ def main():
                 if 'ai_not_serp' in locals() and ai_not_serp:
                     ai_not_serp_df = pd.DataFrame(ai_not_serp)
                     st.download_button(
-                        label="📥 Download AI-Popular Domains",
+                        label="📥 AI-Popular Domains",
                         data=ai_not_serp_df.to_csv(index=False),
                         file_name="ai_popular_domains.csv",
                         mime="text/csv"
@@ -364,7 +494,7 @@ def main():
                 if 'serp_not_ai' in locals() and serp_not_ai:
                     serp_not_ai_df = pd.DataFrame(serp_not_ai)
                     st.download_button(
-                        label="📥 Download SERP-Popular Domains",
+                        label="📥 SERP-Popular Domains",
                         data=serp_not_ai_df.to_csv(index=False),
                         file_name="serp_popular_domains.csv",
                         mime="text/csv"
@@ -377,23 +507,19 @@ def main():
     else:
         st.info("👆 Please upload a CSV file to begin the analysis")
         
-        st.subheader("📋 Required Columns")
+        st.subheader("📋 How It Works")
         st.markdown("""
-        **Coverage Columns:**
-        - `sge_queries_covered` - SGE query coverage
-        - `perplexity_queries_covered` - Perplexity query coverage  
-        - `gpt_queries_covered` - GPT query coverage
-        - `serp_queries_covered` - SERP query coverage
+        **Coverage Calculation:**
+        - **AIO Covered**: 1 if has `aio_response_sources` or valid `aio_response_status`
+        - **Perplexity Covered**: 1 if has `perplexity_sources` or `perplexity_response_text`  
+        - **GPT Covered**: 1 if has `gpt_sources` or `gpt_response_text`
+        - **SERP Covered**: 1 if has `serp_results`
+        - **AI Total**: Sum of AIO + Perplexity + GPT coverage per query
         
-        **Source Columns:**
-        - `gpt_sources` - URLs cited by GPT
-        - `perplexity_sources` - URLs cited by Perplexity  
-        - `aio_response_sources` - URLs cited by AIO
-        
-        **Analysis:**
-        - **AI Total** = Sum of SGE + Perplexity + GPT coverage per row
-        - Domains weighted by their associated query coverage scores
-        - Comparison of AI-popular vs SERP-popular domains
+        **Domain Scoring:**
+        - Each domain gets points equal to the AI total score for queries where it appears
+        - Compares AI-favored domains vs SERP-popular domains
+        - Shows platform-specific breakdowns (which AI cited which domains)
         """)
 
 if __name__ == "__main__":
