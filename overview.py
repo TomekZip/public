@@ -98,7 +98,7 @@ def main():
             with col1:
                 fig_dtype = px.pie(
                     values=dtype_counts.values, 
-                    names=dtype_counts.index,
+                    names=[str(dtype) for dtype in dtype_counts.index],  # Convert to strings
                     title="Distribution of Data Types"
                 )
                 st.plotly_chart(fig_dtype, use_container_width=True)
