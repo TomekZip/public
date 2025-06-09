@@ -249,13 +249,29 @@ def main():
                 st.header("Domains Popular in AI but Not in SERP")
                 st.markdown("Domains frequently cited by AI platforms but rarely appearing in SERP results")
                 
-                # Find domains popular in AI but not in SERP
+                # Show data distribution first
+                ai_scores_list = list(domain_ai_scores.values())
+                serp_scores_list = list(domain_serp_scores.values())
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Max AI Score", max(ai_scores_list) if ai_scores_list else 0)
+                with col2:
+                    st.metric("Avg AI Score", f"{np.mean(ai_scores_list):.1f}" if ai_scores_list else 0)
+                with col3:
+                    st.metric("Domains with AI Score > 0", sum(1 for s in ai_scores_list if s > 0))
+                
+                # Find domains popular in AI but not in SERP with more flexible thresholds
                 ai_not_serp = []
+                ai_threshold = max(1, np.percentile(ai_scores_list, 60) if ai_scores_list else 1)  # Top 40% of AI scores
+                
+                st.info(f"Using AI threshold: {ai_threshold:.1f} (top 40% of AI scores)")
+                
                 for domain, ai_score in domain_ai_scores.items():
                     serp_score = domain_serp_scores.get(domain, 0)
                     
-                    # Consider "popular in AI" if score >= 2, "not popular in SERP" if SERP score is 0 or much lower
-                    if ai_score >= 2 and (serp_score == 0 or ai_score > serp_score * 3):
+                    # More flexible criteria: AI score above threshold AND (no SERP presence OR AI score > 2x SERP score)
+                    if ai_score >= ai_threshold and (serp_score == 0 or ai_score > serp_score * 2):
                         breakdown = domain_breakdown.get(domain, {})
                         ai_not_serp.append({
                             'Domain': domain,
@@ -264,10 +280,11 @@ def main():
                             'AIO Citations': breakdown.get('aio_response_sources', 0),
                             'Perplexity Citations': breakdown.get('perplexity_sources', 0),
                             'GPT Citations': breakdown.get('gpt_sources', 0),
-                            'AI/SERP Ratio': ai_score / serp_score if serp_score > 0 else float('inf')
+                            'AI/SERP Ratio': ai_score / serp_score if serp_score > 0 else float('inf'),
+                            'Difference': ai_score - serp_score
                         })
                 
-                ai_not_serp.sort(key=lambda x: x['AI Score'], reverse=True)
+                ai_not_serp.sort(key=lambda x: x['Difference'], reverse=True)
                 
                 if ai_not_serp:
                     # Visualization
@@ -279,7 +296,7 @@ def main():
                         x=ai_scores,
                         y=domains,
                         orientation='h',
-                        title="Top 15 Domains: High AI Coverage, Low SERP Coverage",
+                        title="Top 15 Domains: Higher AI Coverage than SERP Coverage",
                         labels={'x': 'AI Coverage Score', 'y': 'Domain'},
                         color=ai_scores,
                         color_continuous_scale='reds'
@@ -287,22 +304,52 @@ def main():
                     fig.update_layout(height=500, yaxis={'categoryorder':'total ascending'})
                     st.plotly_chart(fig, use_container_width=True)
                     
-                    st.subheader(f"📋 All {len(ai_not_serp)} Domains Popular in AI but Not SERP")
+                    st.subheader(f"📋 All {len(ai_not_serp)} Domains More Popular in AI than SERP")
                     st.dataframe(pd.DataFrame(ai_not_serp), use_container_width=True)
                 else:
-                    st.info("No domains found that are significantly more popular in AI than SERP")
+                    st.warning("No domains found that are more popular in AI than SERP with current thresholds")
+                    
+                    # Show some examples anyway
+                    st.subheader("🔍 Top AI Domains Regardless of SERP Comparison")
+                    top_ai_only = sorted(domain_ai_scores.items(), key=lambda x: x[1], reverse=True)[:10]
+                    ai_only_data = []
+                    for domain, ai_score in top_ai_only:
+                        serp_score = domain_serp_scores.get(domain, 0)
+                        breakdown = domain_breakdown.get(domain, {})
+                        ai_only_data.append({
+                            'Domain': domain,
+                            'AI Score': ai_score,
+                            'SERP Score': serp_score,
+                            'AIO Citations': breakdown.get('aio_response_sources', 0),
+                            'Perplexity Citations': breakdown.get('perplexity_sources', 0),
+                            'GPT Citations': breakdown.get('gpt_sources', 0)
+                        })
+                    st.dataframe(pd.DataFrame(ai_only_data), use_container_width=True)
             
             with tab3:
                 st.header("Domains Popular in SERP but Not in AI")
                 st.markdown("Domains frequently appearing in SERP results but rarely cited by AI platforms")
                 
-                # Find domains popular in SERP but not in AI
+                # Show data distribution first
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Max SERP Score", max(serp_scores_list) if serp_scores_list else 0)
+                with col2:
+                    st.metric("Avg SERP Score", f"{np.mean(serp_scores_list):.1f}" if serp_scores_list else 0)
+                with col3:
+                    st.metric("Domains with SERP Score > 0", sum(1 for s in serp_scores_list if s > 0))
+                
+                # Find domains popular in SERP but not in AI with more flexible thresholds
                 serp_not_ai = []
+                serp_threshold = max(1, np.percentile(serp_scores_list, 60) if serp_scores_list else 1)  # Top 40% of SERP scores
+                
+                st.info(f"Using SERP threshold: {serp_threshold:.1f} (top 40% of SERP scores)")
+                
                 for domain, serp_score in domain_serp_scores.items():
                     ai_score = domain_ai_scores.get(domain, 0)
                     
-                    # Consider "popular in SERP" if score >= 2, "not popular in AI" if AI score is 0 or much lower
-                    if serp_score >= 2 and (ai_score == 0 or serp_score > ai_score * 3):
+                    # More flexible criteria: SERP score above threshold AND (no AI presence OR SERP score > 2x AI score)
+                    if serp_score >= serp_threshold and (ai_score == 0 or serp_score > ai_score * 2):
                         breakdown = domain_breakdown.get(domain, {})
                         serp_not_ai.append({
                             'Domain': domain,
@@ -311,10 +358,11 @@ def main():
                             'AIO Citations': breakdown.get('aio_response_sources', 0),
                             'Perplexity Citations': breakdown.get('perplexity_sources', 0),
                             'GPT Citations': breakdown.get('gpt_sources', 0),
-                            'SERP/AI Ratio': serp_score / ai_score if ai_score > 0 else float('inf')
+                            'SERP/AI Ratio': serp_score / ai_score if ai_score > 0 else float('inf'),
+                            'Difference': serp_score - ai_score
                         })
                 
-                serp_not_ai.sort(key=lambda x: x['SERP Score'], reverse=True)
+                serp_not_ai.sort(key=lambda x: x['Difference'], reverse=True)
                 
                 if serp_not_ai:
                     # Visualization
@@ -326,7 +374,7 @@ def main():
                         x=serp_scores,
                         y=domains,
                         orientation='h',
-                        title="Top 15 Domains: High SERP Coverage, Low AI Coverage",
+                        title="Top 15 Domains: Higher SERP Coverage than AI Coverage",
                         labels={'x': 'SERP Coverage Score', 'y': 'Domain'},
                         color=serp_scores,
                         color_continuous_scale='blues'
@@ -334,10 +382,27 @@ def main():
                     fig.update_layout(height=500, yaxis={'categoryorder':'total ascending'})
                     st.plotly_chart(fig, use_container_width=True)
                     
-                    st.subheader(f"📋 All {len(serp_not_ai)} Domains Popular in SERP but Not AI")
+                    st.subheader(f"📋 All {len(serp_not_ai)} Domains More Popular in SERP than AI")
                     st.dataframe(pd.DataFrame(serp_not_ai), use_container_width=True)
                 else:
-                    st.info("No domains found that are significantly more popular in SERP than AI")
+                    st.warning("No domains found that are more popular in SERP than AI with current thresholds")
+                    
+                    # Show some examples anyway
+                    st.subheader("🔍 Top SERP Domains Regardless of AI Comparison")
+                    top_serp_only = sorted(domain_serp_scores.items(), key=lambda x: x[1], reverse=True)[:10]
+                    serp_only_data = []
+                    for domain, serp_score in top_serp_only:
+                        ai_score = domain_ai_scores.get(domain, 0)
+                        breakdown = domain_breakdown.get(domain, {})
+                        serp_only_data.append({
+                            'Domain': domain,
+                            'SERP Score': serp_score,
+                            'AI Score': ai_score,
+                            'AIO Citations': breakdown.get('aio_response_sources', 0),
+                            'Perplexity Citations': breakdown.get('perplexity_sources', 0),
+                            'GPT Citations': breakdown.get('gpt_sources', 0)
+                        })
+                    st.dataframe(pd.DataFrame(serp_only_data), use_container_width=True)
             
             with tab4:
                 st.header("AI Platform Breakdown Analysis")
